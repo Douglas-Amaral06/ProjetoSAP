@@ -39,6 +39,12 @@ wheels/
 .DS_Store
 Thumbs.db
 
+# Database files
+*.db
+*.db-shm
+*.db-wal
+sap_chamados.*
+
 # Project specific
 *.log
 .cache/
