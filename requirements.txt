@@ -8,3 +8,4 @@ werkzeug>=2.3
 sentence-transformers>=2.2
 numpy>=1.24
 psycopg2-binary>=2.9  # [NOVO R9] Suporte a PostgreSQL
+boto3

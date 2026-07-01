@@ -412,16 +412,15 @@ with aba_fila:
                                 with col_acao:
                                     # Botão para download
                                     try:
-                                        with open(anexo["caminho_arquivo"], "rb") as f:
-                                            conteudo = f.read()
-                                            st.download_button(
-                                                label="⬇️",
-                                                data=conteudo,
-                                                file_name=anexo["nome_arquivo"],
-                                                mime=anexo.get("tipo_mime", "application/octet-stream"),
-                                                key=f"download_eq_{anexo['id']}",
-                                                use_container_width=True
-                                            )
+                                        conteudo = backend.baixar_conteudo_anexo(anexo["caminho_arquivo"])
+                                        st.download_button(
+                                            label="⬇️",
+                                            data=conteudo,
+                                            file_name=anexo["nome_arquivo"],
+                                            mime=anexo.get("tipo_mime", "application/octet-stream"),
+                                            key=f"download_eq_{anexo['id']}",
+                                            use_container_width=True
+                                        )
                                     except Exception as e:
                                         st.error(f"Arquivo não encontrado: {e}")
                     

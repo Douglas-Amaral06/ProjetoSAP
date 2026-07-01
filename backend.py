@@ -2,6 +2,16 @@ import os
 import sqlite3
 from datetime import datetime
 from pathlib import Path
+import boto3
+from uuid import uuid4
+
+S3_BUCKET = os.getenv("AWS_S3_BUCKET")
+s3_client = boto3.client(
+    's3',
+    aws_access_key_id=os.getenv("AWS_ACCESS_KEY_ID"),
+    aws_secret_access_key=os.getenv("AWS_SECRET_ACCESS_KEY"),
+    region_name=os.getenv("AWS_DEFAULT_REGION", "us-east-1")
+)
 
 import pandas as pd
 import numpy as np
@@ -1069,17 +1079,9 @@ def contar_interacoes(ticket_id: int) -> int:
 # [NOVO R10] Funções para Anexos nos Chamados
 # =====================================================================
 
-def criar_pasta_anexos():
-    """Cria pasta para armazenar anexos se não existir."""
-    pasta_anexos = Path(__file__).parent / "anexos"
-    if not pasta_anexos.exists():
-        pasta_anexos.mkdir(parents=True, exist_ok=True)
-    return pasta_anexos
-
-
 def salvar_anexo(ticket_id: int, usuario_id: int, arquivo_stream, nome_arquivo: str, tipo_mime: str = None) -> int:
     """
-    [NOVO R10] Salva um arquivo anexado a um chamado.
+    [MODIFICADO R10] Salva um arquivo anexado diretamente no AWS S3.
     
     Args:
         ticket_id: ID do chamado
@@ -1091,70 +1093,31 @@ def salvar_anexo(ticket_id: int, usuario_id: int, arquivo_stream, nome_arquivo: 
     Returns:
         ID do anexo salvo
     """
-    # Validação básica
-    if not ticket_id or not usuario_id:
-        raise ValueError("Ticket ID e Usuário ID são obrigatórios.")
+    if not ticket_id or not usuario_id or not nome_arquivo.strip():
+        raise ValueError("Dados incompletos para salvar anexo.")
     
-    if not nome_arquivo or not nome_arquivo.strip():
-        raise ValueError("Nome do arquivo é obrigatório.")
-    
-    pasta_anexos = criar_pasta_anexos()
-    
-    # Gerar nome único para o arquivo
-    from uuid import uuid4
     nome_unico = f"{uuid4()}_{nome_arquivo}"
-    caminho_arquivo = pasta_anexos / nome_unico
+    conteudo = arquivo_stream.read()
+    tamanho_bytes = len(conteudo)
     
-    # Salvar arquivo
-    tamanho_bytes = 0
+    # Upload para o S3
     try:
-        with open(caminho_arquivo, "wb") as f:
-            conteudo = arquivo_stream.read()
-            tamanho_bytes = len(conteudo)
-            f.write(conteudo)
+        s3_client.put_object(
+            Bucket=S3_BUCKET,
+            Key=nome_unico,
+            Body=conteudo,
+            ContentType=tipo_mime
+        )
     except Exception as e:
-        raise ValueError(f"Erro ao salvar arquivo: {e}")
+        raise ValueError(f"Erro ao fazer upload para a nuvem: {e}")
     
-    # Salvar metadados no banco
+    # Salvar metadados no banco (SQLite/Postgres)
     with get_connection() as conn:
         cursor = conn.cursor()
-        
-        # Verificar se ticket existe
-        cursor.execute("SELECT id FROM tickets WHERE id = ?", (ticket_id,))
-        if not cursor.fetchone():
-            # Tentar limpar o arquivo salvo
-            try:
-                caminho_arquivo.unlink(missing_ok=True)
-            except:
-                pass
-            raise ValueError("Chamado não encontrado.")
-        
-        # Verificar se usuário existe
-        cursor.execute("SELECT id FROM usuarios WHERE id = ?", (usuario_id,))
-        if not cursor.fetchone():
-            # Tentar limpar o arquivo salvo
-            try:
-                caminho_arquivo.unlink(missing_ok=True)
-            except:
-                pass
-            raise ValueError("Usuário não encontrado.")
-        
-        # Inserir registro do anexo
         cursor.execute("""
-            INSERT INTO ticket_anexos (
-                ticket_id, usuario_id, nome_arquivo, caminho_arquivo,
-                tipo_mime, tamanho_bytes
-            )
+            INSERT INTO ticket_anexos (ticket_id, usuario_id, nome_arquivo, caminho_arquivo, tipo_mime, tamanho_bytes)
             VALUES (?, ?, ?, ?, ?, ?)
-        """, (
-            ticket_id,
-            usuario_id,
-            nome_arquivo.strip(),
-            str(caminho_arquivo),
-            tipo_mime,
-            tamanho_bytes
-        ))
-        
+        """, (ticket_id, usuario_id, nome_arquivo.strip(), nome_unico, tipo_mime, tamanho_bytes))
         conn.commit()
         return cursor.lastrowid
 
@@ -1200,34 +1163,46 @@ def obter_anexo(anexo_id: int) -> dict | None:
         return cursor.fetchone()
 
 
+def baixar_conteudo_anexo(chave_s3: str) -> bytes:
+    """
+    [NOVO R10] Faz o download do arquivo do S3 para a memória do Streamlit.
+    
+    Args:
+        chave_s3: Chave do arquivo no S3 (armazenada em caminho_arquivo)
+    
+    Returns:
+        Conteúdo do arquivo em bytes
+    """
+    try:
+        response = s3_client.get_object(Bucket=S3_BUCKET, Key=chave_s3)
+        return response['Body'].read()
+    except Exception as e:
+        raise ValueError(f"Erro ao baixar do S3: {e}")
+
+
 def excluir_anexo(anexo_id: int) -> None:
     """
-    [NOVO R10] Exclui um anexo (arquivo físico e registro no banco).
+    [MODIFICADO R10] Exclui um anexo do banco e do AWS S3.
     """
     with get_connection() as conn:
         cursor = conn.cursor()
-        
-        # Obter informações do anexo antes de excluir
         cursor.execute("SELECT caminho_arquivo FROM ticket_anexos WHERE id = ?", (anexo_id,))
         resultado = cursor.fetchone()
         
         if not resultado:
             raise ValueError("Anexo não encontrado.")
         
-        caminho_arquivo = resultado["caminho_arquivo"]
+        chave_s3 = resultado["caminho_arquivo"]
         
         # Excluir registro do banco
         cursor.execute("DELETE FROM ticket_anexos WHERE id = ?", (anexo_id,))
         conn.commit()
         
-        # Excluir arquivo físico
+        # Excluir do S3
         try:
-            if caminho_arquivo:
-                import os
-                if os.path.exists(caminho_arquivo):
-                    os.remove(caminho_arquivo)
+            s3_client.delete_object(Bucket=S3_BUCKET, Key=chave_s3)
         except Exception as e:
-            print(f"Aviso: Não foi possível excluir arquivo físico {caminho_arquivo}. Erro: {e}")
+            print(f"Aviso: Não foi possível excluir arquivo físico {chave_s3} no S3. Erro: {e}")
 
 
 def contar_anexos(ticket_id: int) -> int:
